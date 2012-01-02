@@ -10,6 +10,8 @@ else
       else
         loaded_adapters  = Faraday::Adapter.all_loaded_constants
         loaded_adapters -= [Faraday::Adapter::ActionDispatch]
+        # https://github.com/geemus/excon/issues/98
+        loaded_adapters -= [Faraday::Adapter::Excon] if defined? RUBY_ENGINE and "rbx" == RUBY_ENGINE
         loaded_adapters << :default
       end
 
@@ -39,14 +41,14 @@ else
           end
         end
 
-        #GET request with body
-        unless %[Faraday::Adapter::NetHttp] == adapter.to_s
+        # https://github.com/dbalatero/typhoeus/issues/75
+        # https://github.com/toland/patron/issues/52
+        unless %[Faraday::Adapter::Typhoeus Faraday::Adapter::Patron].include? adapter.to_s
           define_method "test_#{adapter}_GET_with_body" do
-            body = '{hello: world}'
-            response = create_connection(adapter).get('get/body') do |req|
-              req.body = body
+            response = create_connection(adapter).get('echo') do |req|
+              req.body = {'bodyrock' => true}
             end
-            assert_equal body, response.body
+            assert_equal %(get {"bodyrock"=>"true"}), response.body
           end
         end
 
