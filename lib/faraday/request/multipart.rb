@@ -1,22 +1,23 @@
+require File.expand_path("../url_encoded", __FILE__)
+
 module Faraday
   class Request::Multipart < Request::UrlEncoded
     self.mime_type = 'multipart/form-data'.freeze
-    DEFAULT_BOUNDARY = "-----------RubyMultipartPost".freeze
+    DEFAULT_BOUNDARY = "-----------RubyMultipartPost".freeze unless defined? DEFAULT_BOUNDARY
 
     def call(env)
       match_content_type(env) do |params|
-        env[:request] ||= {}
-        env[:request][:boundary] ||= DEFAULT_BOUNDARY
-        env[:request_headers][CONTENT_TYPE] += ";boundary=#{env[:request][:boundary]}"
-        env[:body] = create_multipart(env, params)
+        env.request.boundary ||= DEFAULT_BOUNDARY
+        env.request_headers[CONTENT_TYPE] += "; boundary=#{env.request.boundary}"
+        env.body = create_multipart(env, params)
       end
       @app.call env
     end
 
     def process_request?(env)
       type = request_type(env)
-      env[:body].respond_to?(:each_key) and !env[:body].empty? and (
-        (type.empty? and has_multipart?(env[:body])) or
+      env.body.respond_to?(:each_key) and !env.body.empty? and (
+        (type.empty? and has_multipart?(env.body)) or
         type == self.class.mime_type
       )
     end
@@ -32,14 +33,14 @@ module Faraday
     end
 
     def create_multipart(env, params)
-      boundary = env[:request][:boundary]
+      boundary = env.request.boundary
       parts = process_params(params) do |key, value|
         Faraday::Parts::Part.new(boundary, key, value)
       end
       parts << Faraday::Parts::EpiloguePart.new(boundary)
 
       body = Faraday::CompositeReadIO.new(parts)
-      env[:request_headers]['Content-Length'] = body.length.to_s
+      env.request_headers[Faraday::Env::ContentLength] = body.length.to_s
       return body
     end
 

@@ -1,7 +1,7 @@
 # encoding: utf-8
-require File.expand_path(File.join(File.dirname(__FILE__), 'helper'))
+require File.expand_path('../helper', __FILE__)
 
-Faraday::CompositeReadIO.send :attr_reader, :ios
+Faraday::CompositeReadIO.class_eval { attr_reader :ios }
 
 class RequestMiddlewareTest < Faraday::TestCase
   def setup
@@ -14,6 +14,20 @@ class RequestMiddlewareTest < Faraday::TestCase
           [200, {'Content-Type' => posted_as}, env[:body]]
         end
       end
+    end
+  end
+
+  def with_utf8
+    if defined?(RUBY_VERSION) && RUBY_VERSION.match(/1.8.\d/)
+      begin
+        previous_kcode = $KCODE
+        $KCODE = "UTF8"
+        yield
+      ensure
+        $KCODE = previous_kcode
+      end
+    else
+      yield
     end
   end
 
@@ -48,12 +62,32 @@ class RequestMiddlewareTest < Faraday::TestCase
     assert_equal expected, Faraday::Utils.parse_nested_query(response.body)
   end
 
+  def test_url_encoded_non_nested
+    response = @conn.post('/echo', { :dimensions => ['date', 'location']}) do |req|
+      req.options.params_encoder = Faraday::FlatParamsEncoder
+    end
+    assert_equal 'application/x-www-form-urlencoded', response.headers['Content-Type']
+    expected = { 'dimensions' => ['date', 'location'] }
+    assert_equal expected, Faraday::Utils.parse_query(response.body)
+    assert_equal 'dimensions=date&dimensions=location', response.body
+  end
+
   def test_url_encoded_unicode
     err = capture_warnings {
       response = @conn.post('/echo', {:str => "eé cç aã aâ"})
       assert_equal "str=e%C3%A9+c%C3%A7+a%C3%A3+a%C3%A2", response.body
     }
-    assert err.empty?
+    assert err.empty?, "stderr did include: #{err}"
+  end
+
+  def test_url_encoded_unicode_with_kcode_set
+    with_utf8 do
+      err = capture_warnings {
+        response = @conn.post('/echo', {:str => "eé cç aã aâ"})
+        assert_equal "str=e%C3%A9+c%C3%A7+a%C3%A3+a%C3%A2", response.body
+      }
+      assert err.empty?, "stderr did include: #{err}"
+    end
   end
 
   def test_url_encoded_nested_keys
@@ -72,7 +106,7 @@ class RequestMiddlewareTest < Faraday::TestCase
     response = @conn.post('/echo', payload)
 
     assert_kind_of Faraday::CompositeReadIO, response.body
-    assert_equal "multipart/form-data;boundary=%s" % Faraday::Request::Multipart::DEFAULT_BOUNDARY,
+    assert_equal "multipart/form-data; boundary=%s" % Faraday::Request::Multipart::DEFAULT_BOUNDARY,
       response.headers['Content-Type']
 
     response.body.send(:ios).map{|io| io.read}.each do |io|
@@ -82,7 +116,7 @@ class RequestMiddlewareTest < Faraday::TestCase
     end
     assert_equal [], regexes
   end
-  
+
   def test_multipart_with_arrays
     # assume params are out of order
     regexes = [
@@ -94,7 +128,7 @@ class RequestMiddlewareTest < Faraday::TestCase
     response = @conn.post('/echo', payload)
 
     assert_kind_of Faraday::CompositeReadIO, response.body
-    assert_equal "multipart/form-data;boundary=%s" % Faraday::Request::Multipart::DEFAULT_BOUNDARY,
+    assert_equal "multipart/form-data; boundary=%s" % Faraday::Request::Multipart::DEFAULT_BOUNDARY,
       response.headers['Content-Type']
 
     response.body.send(:ios).map{|io| io.read}.each do |io|
@@ -104,5 +138,5 @@ class RequestMiddlewareTest < Faraday::TestCase
     end
     assert_equal [], regexes
   end
-  
+
 end

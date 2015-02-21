@@ -1,11 +1,12 @@
 module Faraday
-  # Possibly going to extend this a bit.
+  # A Builder that processes requests into responses by passing through an inner
+  # middleware stack (heavily inspired by Rack).
   #
-  # Faraday::Connection.new(:url => 'http://sushi.com') do |builder|
-  #   builder.request  :url_encoded  # Faraday::Request::UrlEncoded
-  #   builder.adapter  :net_http     # Faraday::Adapter::NetHttp
-  # end
-  class Builder
+  #   Faraday::Connection.new(:url => 'http://sushi.com') do |builder|
+  #     builder.request  :url_encoded  # Faraday::Request::UrlEncoded
+  #     builder.adapter  :net_http     # Faraday::Adapter::NetHttp
+  #   end
+  class RackBuilder
     attr_accessor :handlers
 
     # Error raised when trying to modify the stack after calling `lock!`
@@ -14,15 +15,19 @@ module Faraday
     # borrowed from ActiveSupport::Dependencies::Reference &
     # ActionDispatch::MiddlewareStack::Middleware
     class Handler
+      @@constants_mutex = Mutex.new
       @@constants = Hash.new { |h, k|
-        h[k] = k.respond_to?(:constantize) ? k.constantize : Object.const_get(k)
+        value = k.respond_to?(:constantize) ? k.constantize : Object.const_get(k)
+        @@constants_mutex.synchronize { h[k] = value }
       }
 
       attr_reader :name
 
       def initialize(klass, *args, &block)
         @name = klass.to_s
-        @@constants[@name] = klass if klass.respond_to?(:name)
+        if klass.respond_to?(:name)
+          @@constants_mutex.synchronize { @@constants[@name] = klass }
+        end
         @args, @block = args, block
       end
 
@@ -58,24 +63,11 @@ module Faraday
     def build(options = {})
       raise_if_locked
       @handlers.clear unless options[:keep]
-      yield self if block_given?
+      yield(self) if block_given?
     end
 
     def [](idx)
       @handlers[idx]
-    end
-
-    def ==(other)
-      other.is_a?(self.class) && @handlers == other.handlers
-    end
-
-    def dup
-      self.class.new(@handlers.dup)
-    end
-
-    def to_app(inner_app)
-      # last added handler is the deepest and thus closest to the inner app
-      @handlers.reverse.inject(inner_app) { |app, handler| handler.build(app) }
     end
 
     # Locks the middleware stack to ensure no further modifications are possible.
@@ -134,6 +126,71 @@ module Faraday
     def delete(handler)
       raise_if_locked
       @handlers.delete(handler)
+    end
+
+    # Processes a Request into a Response by passing it through this Builder's
+    # middleware stack.
+    #
+    # connection - Faraday::Connection
+    # request    - Faraday::Request
+    #
+    # Returns a Faraday::Response.
+    def build_response(connection, request)
+      app.call(build_env(connection, request))
+    end
+
+    # The "rack app" wrapped in middleware. All requests are sent here.
+    #
+    # The builder is responsible for creating the app object. After this,
+    # the builder gets locked to ensure no further modifications are made
+    # to the middleware stack.
+    #
+    # Returns an object that responds to `call` and returns a Response.
+    def app
+      @app ||= begin
+        lock!
+        to_app(lambda { |env|
+          response = Response.new
+          response.finish(env) unless env.parallel?
+          env.response = response
+        })
+      end
+    end
+
+    def to_app(inner_app)
+      # last added handler is the deepest and thus closest to the inner app
+      @handlers.reverse.inject(inner_app) { |app, handler| handler.build(app) }
+    end
+
+    def ==(other)
+      other.is_a?(self.class) && @handlers == other.handlers
+    end
+
+    def dup
+      self.class.new(@handlers.dup)
+    end
+
+    # ENV Keys
+    # :method - a symbolized request method (:get, :post)
+    # :body   - the request body that will eventually be converted to a string.
+    # :url    - URI instance for the current request.
+    # :status           - HTTP response status code
+    # :request_headers  - hash of HTTP Headers to be sent to the server
+    # :response_headers - Hash of HTTP headers from the server
+    # :parallel_manager - sent if the connection is in parallel mode
+    # :request - Hash of options for configuring the request.
+    #   :timeout      - open/read timeout Integer in seconds
+    #   :open_timeout - read timeout Integer in seconds
+    #   :proxy        - Hash of proxy options
+    #     :uri        - Proxy Server URI
+    #     :user       - Proxy server username
+    #     :password   - Proxy server password
+    # :ssl - Hash of options for configuring SSL requests.
+    def build_env(connection, request)
+      Env.new(request.method, request.body,
+        connection.build_exclusive_url(request.path, request.params),
+        request.options, request.headers, connection.ssl,
+        connection.parallel_manager)
     end
 
     private

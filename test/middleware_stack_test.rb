@@ -1,4 +1,4 @@
-require File.expand_path(File.join(File.dirname(__FILE__), 'helper'))
+require File.expand_path('../helper', __FILE__)
 
 class MiddlewareStackTest < Faraday::TestCase
   # mock handler classes
@@ -11,6 +11,10 @@ class MiddlewareStackTest < Faraday::TestCase
   class Apple < Handler; end
   class Orange < Handler; end
   class Banana < Handler; end
+
+  class Broken < Faraday::Middleware
+    dependency 'zomg/i_dont/exist'
+  end
 
   def setup
     @conn = Faraday::Connection.new
@@ -71,7 +75,7 @@ class MiddlewareStackTest < Faraday::TestCase
     @conn.get('/')
     assert @builder.locked?
 
-    assert_raises Faraday::Builder::StackLocked do
+    assert_raises Faraday::RackBuilder::StackLocked do
       @conn.use Orange
     end
   end
@@ -91,16 +95,16 @@ class MiddlewareStackTest < Faraday::TestCase
     build_stack Apple
     assert_equal @builder.handlers.first, Apple
     assert_equal @builder.handlers[0,1], [Apple]
-    assert_equal @builder.handlers.first, Faraday::Builder::Handler.new(Apple)
+    assert_equal @builder.handlers.first, Faraday::RackBuilder::Handler.new(Apple)
   end
 
   def test_unregistered_symbol
-    err = assert_raise(RuntimeError) { build_stack :apple }
+    err = assert_raises(Faraday::Error){ build_stack :apple }
     assert_equal ":apple is not registered on Faraday::Middleware", err.message
   end
 
   def test_registered_symbol
-    Faraday.register_middleware :apple => Apple
+    Faraday::Middleware.register_middleware :apple => Apple
     begin
       build_stack :apple
       assert_handlers %w[Apple]
@@ -110,7 +114,7 @@ class MiddlewareStackTest < Faraday::TestCase
   end
 
   def test_registered_symbol_with_proc
-    Faraday.register_middleware :apple => lambda { Apple }
+    Faraday::Middleware.register_middleware :apple => lambda { Apple }
     begin
       build_stack :apple
       assert_handlers %w[Apple]
@@ -119,14 +123,24 @@ class MiddlewareStackTest < Faraday::TestCase
     end
   end
 
-  def test_registered_symbol_with_type
-    Faraday.register_middleware :request, :orange => Orange
+  def test_registered_symbol_with_array
+    Faraday::Middleware.register_middleware File.expand_path("..", __FILE__),
+      :strawberry => [lambda { Strawberry }, 'strawberry']
     begin
-      build_stack {|b| b.request :orange }
-      assert_handlers %w[Orange]
+      build_stack :strawberry
+      assert_handlers %w[Strawberry]
     ensure
-      unregister_middleware Faraday::Request, :orange
+      unregister_middleware Faraday::Middleware, :strawberry
     end
+  end
+
+  def test_missing_dependencies
+    build_stack Broken
+    err = assert_raises RuntimeError do
+      @conn.get('/')
+    end
+    assert_match "missing dependency for MiddlewareStackTest::Broken: ", err.message
+    assert_match "zomg/i_dont/exist", err.message
   end
 
   private
@@ -135,7 +149,7 @@ class MiddlewareStackTest < Faraday::TestCase
   def build_stack(*handlers)
     @builder.build do |b|
       handlers.each { |handler| b.use(*handler) }
-      yield b if block_given?
+      yield(b) if block_given?
 
       b.adapter :test do |stub|
         stub.get '/' do |env|

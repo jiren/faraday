@@ -1,24 +1,25 @@
 source 'https://rubygems.org'
 
-group :development do
-  gem 'sinatra', '~> 1.2'
-end
+gem 'ffi-ncurses', '~> 0.3', :platforms => :jruby
+gem 'jruby-openssl', '~> 0.8.8', :platforms => :jruby
+gem 'rake'
 
 group :test do
-  gem 'em-http-request', '~> 1.0', :require => 'em-http'
-  gem 'em-synchrony', '~> 1.0', :require => ['em-synchrony', 'em-synchrony/em-http'], :platforms => :ruby_19
-  gem 'excon', '~> 0.6'
-  gem 'leftright', '~> 0.9', :require => false
-end
-
-platforms :ruby do
-  gem 'patron', '~> 0.4'
-  gem 'typhoeus', '~> 0.3'
-end
-
-platforms :jruby do
-  gem 'jruby-openssl', '~> 0.7'
-  gem 'ffi-ncurses', '~> 0.3'
+  gem 'coveralls', :require => false
+  gem 'em-http-request', '>= 1.1', :require => 'em-http'
+  gem 'em-synchrony', '>= 1.0.3', :require => ['em-synchrony', 'em-synchrony/em-http']
+  gem 'excon', '>= 0.27.4'
+  gem 'httpclient', '>= 2.2'
+  gem 'leftright', '>= 0.9', :require => false
+  gem 'mime-types', '~> 1.25', :platforms => [:jruby, :ruby_18]
+  gem 'minitest', '>= 5.0.5'
+  gem 'net-http-persistent', '>= 2.9.4'
+  gem 'patron', '>= 0.4.2', :platforms => :ruby
+  gem 'rack-test', '>= 0.6', :require => 'rack/test'
+  gem 'rest-client', '~> 1.6.0', :platforms => [:jruby, :ruby_18]
+  gem 'simplecov'
+  gem 'sinatra', '~> 1.3'
+  gem 'typhoeus', '~> 0.3.3', :platforms => [:ruby_18, :ruby_19, :ruby_20, :ruby_21]
 end
 
 gemspec

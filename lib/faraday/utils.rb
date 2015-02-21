@@ -1,4 +1,5 @@
-require 'cgi'
+require 'thread'
+Faraday.require_libs 'parameters'
 
 module Faraday
   module Utils
@@ -6,20 +7,29 @@ module Faraday
 
     # Adapted from Rack::Utils::HeaderHash
     class Headers < ::Hash
-      def initialize(hash={})
+      def self.from(value)
+        new(value)
+      end
+
+      def initialize(hash = nil)
         super()
         @names = {}
-        hash.each { |k, v| self[k] = v }
+        self.update(hash || {})
       end
+
+      # need to synchronize concurrent writes to the shared KeyMap
+      keymap_mutex = Mutex.new
 
       # symbol -> string mapper + cache
       KeyMap = Hash.new do |map, key|
-        map[key] = if key.respond_to?(:to_str) then key
+        value = if key.respond_to?(:to_str)
+          key
         else
           key.to_s.split('_').            # :user_agent => %w(user agent)
             each { |w| w.capitalize! }.   # => %w(User Agent)
             join('-')                     # => "User-Agent"
         end
+        keymap_mutex.synchronize { map[key] = value }
       end
       KeyMap[:etag] = "ETag"
 
@@ -30,10 +40,24 @@ module Faraday
 
       def []=(k, v)
         k = KeyMap[k]
-        @names[k.downcase] = k
+        k = (@names[k.downcase] ||= k)
         # join multiple values with a comma
         v = v.to_ary.join(', ') if v.respond_to? :to_ary
-        super k, v
+        super(k, v)
+      end
+
+      def fetch(k, *args, &block)
+        k = KeyMap[k]
+        key = @names.fetch(k.downcase, k)
+        super(key, *args, &block)
+      end
+
+      def delete(k)
+        k = KeyMap[k]
+        if k = @names[k.downcase]
+          @names.delete k.downcase
+          super(k)
+        end
       end
 
       def include?(k)
@@ -57,7 +81,7 @@ module Faraday
 
       def replace(other)
         clear
-        other.each { |k, v| self[k] = v }
+        self.update other
         self
       end
 
@@ -67,11 +91,13 @@ module Faraday
         return unless header_string && !header_string.empty?
         header_string.split(/\r\n/).
           tap  { |a| a.shift if a.first.index('HTTP/') == 0 }. # drop the HTTP status line
-          map  { |h| h.split(/:\s+/, 2) }.reject { |(k, v)| k.nil? }. # split key and value, ignore blank lines
+          map  { |h| h.split(/:\s+/, 2) }.reject { |p| p[0].nil? }. # split key and value, ignore blank lines
           each { |key, value|
             # join multiple values with a comma
-            if self[key] then self[key] << ', ' << value
-            else self[key] = value
+            if self[key]
+              self[key] << ', ' << value
+            else
+              self[key] = value
             end
           }
       end
@@ -116,15 +142,15 @@ module Faraday
         update(other)
       end
 
-      def merge_query(query)
+      def merge_query(query, encoder = nil)
         if query && !query.empty?
-          update Utils.parse_query(query)
+          update((encoder || Utils.default_params_encoder).decode(query))
         end
         self
       end
 
-      def to_query
-        Utils.build_query(self)
+      def to_query(encoder = nil)
+        (encoder || Utils.default_params_encoder).encode(self)
       end
 
       private
@@ -134,66 +160,41 @@ module Faraday
       end
     end
 
-    # Copied from Rack
     def build_query(params)
-      params.map { |k, v|
-        if v.class == Array
-          build_query(v.map { |x| [k, x] })
-        else
-          v.nil? ? escape(k) : "#{escape(k)}=#{escape(v)}"
-        end
-      }.join("&")
+      FlatParamsEncoder.encode(params)
     end
 
-    # Rack's version modified to handle non-String values
-    def build_nested_query(value, prefix = nil)
-      case value
-      when Array
-        value.map { |v| build_nested_query(v, "#{prefix}%5B%5D") }.join("&")
-      when Hash
-        value.map { |k, v|
-          build_nested_query(v, prefix ? "#{prefix}%5B#{escape(k)}%5D" : escape(k))
-        }.join("&")
-      when NilClass
-        prefix
-      else
-        raise ArgumentError, "value must be a Hash" if prefix.nil?
-        "#{prefix}=#{escape(value)}"
-      end
+    def build_nested_query(params)
+      NestedParamsEncoder.encode(params)
     end
 
-    def escape(s) CGI.escape s.to_s end
+    ESCAPE_RE = /[^a-zA-Z0-9 .~_-]/
+
+    def escape(s)
+      s.to_s.gsub(ESCAPE_RE) {|match|
+        '%' + match.unpack('H2' * match.bytesize).join('%').upcase
+      }.tr(' ', '+')
+    end
 
     def unescape(s) CGI.unescape s.to_s end
 
     DEFAULT_SEP = /[&;] */n
 
     # Adapted from Rack
-    def parse_query(qs)
-      params = {}
-
-      (qs || '').split(DEFAULT_SEP).each do |p|
-        k, v = p.split('=', 2).map { |x| unescape(x) }
-
-        if cur = params[k]
-          if cur.class == Array then params[k] << v
-          else params[k] = [cur, v]
-          end
-        else
-          params[k] = v
-        end
-      end
-      params
+    def parse_query(query)
+      FlatParamsEncoder.decode(query)
     end
 
-    def parse_nested_query(qs)
-      params = {}
+    def parse_nested_query(query)
+      NestedParamsEncoder.decode(query)
+    end
 
-      (qs || '').split(DEFAULT_SEP).each do |p|
-        k, v = p.split('=', 2).map { |s| unescape(s) }
-        normalize_params(params, k, v)
-      end
-      params
+    def default_params_encoder
+      @default_params_encoder ||= NestedParamsEncoder
+    end
+
+    class << self
+      attr_writer :default_params_encoder
     end
 
     # Stolen from Rack
@@ -205,7 +206,12 @@ module Faraday
       return if k.empty?
 
       if after == ""
-        params[k] = v
+        if params[k]
+          params[k] = Array[params[k]] unless params[k].kind_of?(Array)
+          params[k] << v
+        else
+          params[k] = v
+        end
       elsif after == "[]"
         params[k] ||= []
         raise TypeError, "expected Array (got #{params[k].class.name}) for param `#{k}'" unless params[k].is_a?(Array)
@@ -228,9 +234,40 @@ module Faraday
       return params
     end
 
-    # Receives a URL and returns just the path with the query string sorted.
+    # Normalize URI() behavior across Ruby versions
+    #
+    # url - A String or URI.
+    #
+    # Returns a parsed URI.
+    def URI(url)
+      if url.respond_to?(:host)
+        url
+      elsif url.respond_to?(:to_str)
+        default_uri_parser.call(url)
+      else
+        raise ArgumentError, "bad argument (expected URI object or URI string)"
+      end
+    end
+
+    def default_uri_parser
+      @default_uri_parser ||= begin
+        require 'uri'
+        Kernel.method(:URI)
+      end
+    end
+
+    def default_uri_parser=(parser)
+      @default_uri_parser = if parser.respond_to?(:call) || parser.nil?
+        parser
+      else
+        parser.method(:parse)
+      end
+    end
+
+    # Receives a String or URI and returns just the path with the query string sorted.
     def normalize_path(url)
-      (url.path != "" ? url.path : "/") +
+      url = URI(url)
+      (url.path.start_with?('/') ? url.path : '/' + url.path) +
       (url.query ? "?#{sort_query_params(url.query)}" : "")
     end
 

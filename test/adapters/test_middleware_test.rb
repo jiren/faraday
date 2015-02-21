@@ -1,9 +1,10 @@
-require File.expand_path(File.join(File.dirname(__FILE__), '..', 'helper'))
+require File.expand_path('../../helper', __FILE__)
 
 module Adapters
   class TestMiddleware < Faraday::TestCase
+    Stubs = Faraday::Adapter.lookup_middleware(:test)::Stubs
     def setup
-      @stubs = Faraday::Adapter::Test::Stubs.new
+      @stubs = Stubs.new
       @conn  = Faraday.new do |builder|
         builder.adapter :test, @stubs
       end
@@ -36,9 +37,16 @@ module Adapters
       @stubs.get('/optional?a=1') { [200, {}, 'a'] }
       assert_equal 'a', @conn.get('/optional?a=1&b=1').body
       assert_equal 'a', @conn.get('/optional?a=1').body
-      assert_raise Faraday::Adapter::Test::Stubs::NotFound do
+      assert_raises Faraday::Adapter::Test::Stubs::NotFound do
         @conn.get('/optional')
       end
+    end
+
+    def test_middleware_with_http_headers
+      @stubs.get('/yo', { 'X-HELLO' => 'hello' }) { [200, {}, 'a'] }
+      @stubs.get('/yo') { [200, {}, 'b'] }
+      assert_equal 'a', @conn.get('/yo') { |env| env.headers['X-HELLO'] = 'hello' }.body
+      assert_equal 'b', @conn.get('/yo').body
     end
 
     def test_middleware_allow_different_outcomes_for_the_same_request
@@ -61,9 +69,45 @@ module Adapters
       assert_equal 'a', @conn.get('http://foo.com/hello?a=1').body
     end
 
+    def test_parses_params_with_default_encoder
+      @stubs.get '/hello' do |env|
+        assert_equal '1', env[:params]['a']['b']
+        [200, {}, 'a']
+      end
+
+      assert_equal 'a', @conn.get('http://foo.com/hello?a[b]=1').body
+    end
+
+    def test_parses_params_with_nested_encoder
+      @stubs.get '/hello' do |env|
+        assert_equal '1', env[:params]['a']['b']
+        [200, {}, 'a']
+      end
+
+      @conn.options.params_encoder = Faraday::NestedParamsEncoder
+      assert_equal 'a', @conn.get('http://foo.com/hello?a[b]=1').body
+    end
+
+    def test_parses_params_with_flat_encoder
+      @stubs.get '/hello' do |env|
+        assert_equal '1', env[:params]['a[b]']
+        [200, {}, 'a']
+      end
+
+      @conn.options.params_encoder = Faraday::FlatParamsEncoder
+      assert_equal 'a', @conn.get('http://foo.com/hello?a[b]=1').body
+    end
+
     def test_raises_an_error_if_no_stub_is_found_for_request
-      assert_raise Faraday::Adapter::Test::Stubs::NotFound do
+      assert_raises Stubs::NotFound do
         @conn.get('/invalid'){ [200, {}, []] }
+      end
+    end
+
+    def test_raises_an_error_if_no_stub_is_found_for_request_without_this_header
+      @stubs.get('/yo', { 'X-HELLO' => 'hello' }) { [200, {}, 'a'] }
+      assert_raises Faraday::Adapter::Test::Stubs::NotFound do
+        @conn.get('/yo')
       end
     end
   end
